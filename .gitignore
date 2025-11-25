@@ -165,3 +165,7 @@ archive/
 logs/
 
 .python-version
+
+# Vim
+.*.swp
+.*.swo

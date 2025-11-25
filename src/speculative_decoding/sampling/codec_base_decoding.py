@@ -1,7 +1,7 @@
 import torch
 from torch.nn import Module
-from utils.logits_processor import LogitsProcessor, GreedyProcessor
-import utils.printing as printing
+from speculative_decoding.utils.logits_processor import LogitsProcessor, GreedyProcessor
+import speculative_decoding.utils.printing as printing
 from typing import List
 
 
@@ -48,7 +48,9 @@ def autoregressive_generate_encoder_decoder(
     )
     decoded_ids[0, 0] = decoder_start_token
 
-    list_tokens_id = (eos_tokens_id if isinstance(eos_tokens_id, list) else [eos_tokens_id])
+    list_tokens_id = (
+        eos_tokens_id if isinstance(eos_tokens_id, list) else [eos_tokens_id]
+    )
     stop_tokens = torch.tensor(list_tokens_id, dtype=torch.long, device=model.device)
 
     for curr in range(1, total_len):

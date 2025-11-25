@@ -1,8 +1,8 @@
 from math import inf
 import torch
 from torch.nn import Module
-from utils.logits_processor import LogitsProcessor, GreedyProcessor
-import utils.printing as printing
+from speculative_decoding.utils.logits_processor import LogitsProcessor, GreedyProcessor
+import speculative_decoding.utils.printing as printing
 from typing import List
 
 
@@ -38,10 +38,22 @@ def autoregressive_generate(
     cache = None
     prompt_len = len(inputs)
     # prepare input tensor
-    max_seq_length = model.config.max_position_embeddings if hasattr(model.config, 'max_position_embeddings') else (model.config.max_context_length if hasattr(model.config, 'max_context_length') else 1024)
+    max_seq_length = (
+        model.config.max_position_embeddings
+        if hasattr(model.config, "max_position_embeddings")
+        else (
+            model.config.max_context_length
+            if hasattr(model.config, "max_context_length")
+            else 1024
+        )
+    )
     total_len = min(max_seq_length, prompt_len + max_gen_len)
-    input_ids = torch.full((1, total_len), pad_token_id, dtype=torch.long, device=model.device)
-    input_ids[0, :prompt_len] = torch.tensor(inputs, dtype=torch.long, device=model.device)
+    input_ids = torch.full(
+        (1, total_len), pad_token_id, dtype=torch.long, device=model.device
+    )
+    input_ids[0, :prompt_len] = torch.tensor(
+        inputs, dtype=torch.long, device=model.device
+    )
 
     list_tokens_id = (
         eos_tokens_id if isinstance(eos_tokens_id, list) else [eos_tokens_id]
@@ -107,18 +119,44 @@ def beam_search_generate(
         return ((min_length + length) / (min_length + 1)) ** alpha
 
     prompt_len = len(inputs)
-    max_seq_length = model.config.max_position_embeddings if hasattr(model.config, 'max_position_embeddings') else (model.config.max_context_length if hasattr(model.config, 'max_context_length') else 1024)
+    max_seq_length = (
+        model.config.max_position_embeddings
+        if hasattr(model.config, "max_position_embeddings")
+        else (
+            model.config.max_context_length
+            if hasattr(model.config, "max_context_length")
+            else 1024
+        )
+    )
 
     assert prompt_len < max_seq_length, "Prompt length exceeds maximum sequence length."
 
     total_len = min(max_seq_length, prompt_len + max_gen_len)
-    input_ids = torch.full((num_beams, total_len), pad_token_id, dtype=torch.long, device=model.device)
-    input_ids[:, :prompt_len] = torch.tensor(inputs, dtype=torch.long, device=model.device)
-    probs = torch.full((num_beams, total_len), torch.finfo(torch.float).min, dtype=torch.float, device=model.device)
-    beams_probs = torch.full((num_beams,), torch.finfo(torch.float).min, dtype=torch.float, device=model.device)
+    input_ids = torch.full(
+        (num_beams, total_len), pad_token_id, dtype=torch.long, device=model.device
+    )
+    input_ids[:, :prompt_len] = torch.tensor(
+        inputs, dtype=torch.long, device=model.device
+    )
+    probs = torch.full(
+        (num_beams, total_len),
+        torch.finfo(torch.float).min,
+        dtype=torch.float,
+        device=model.device,
+    )
+    beams_probs = torch.full(
+        (num_beams,),
+        torch.finfo(torch.float).min,
+        dtype=torch.float,
+        device=model.device,
+    )
     last_indexes = torch.full((num_beams,), -1, dtype=torch.long, device=model.device)
 
-    stop_tokens = torch.tensor((eos_tokens_id if isinstance(eos_tokens_id, list) else [eos_tokens_id]), dtype=torch.long, device=model.device)
+    stop_tokens = torch.tensor(
+        (eos_tokens_id if isinstance(eos_tokens_id, list) else [eos_tokens_id]),
+        dtype=torch.long,
+        device=model.device,
+    )
 
     # prefill
     probs[:, :prompt_len] = 1.0
@@ -129,7 +167,7 @@ def beam_search_generate(
     input_ids[:, prompt_len] = top_tokens
     probs[:, prompt_len] = probs[:, prompt_len - 1] + top_probs
     beams_probs[:] = probs[:, prompt_len] / _length_penalty_fn(1, alpha, min_length)
-    
+
     for curr in range(prompt_len + 1, total_len):
         o = model(input_ids[:, :curr])
         logits = o.logits[:, -1, :]
@@ -144,7 +182,7 @@ def beam_search_generate(
                     (beams_probs[beam], input_vec, prob_vec, last_indexes[beam])
                 )
                 continue
-            
+
             for possibility in range(top_k):
                 new_prob = probs[beam, curr - 1] + top_probs[beam, possibility]
                 lp = _length_penalty_fn(curr - prompt_len, alpha, min_length)
@@ -153,16 +191,26 @@ def beam_search_generate(
                 input_vec = input_ids[beam].detach().clone()
                 input_vec[curr] = top_tokens[beam, possibility]
                 last_token_idx = -1
-                if torch.isin(input_vec[curr], stop_tokens) or input_vec[curr] == pad_token_id:
+                if (
+                    torch.isin(input_vec[curr], stop_tokens)
+                    or input_vec[curr] == pad_token_id
+                ):
                     last_token_idx = curr
-                    
+
                 already_in = False
                 for p in possibilities:
                     if torch.equal(p[1], input_vec):
                         already_in = True
                         break
                 if not already_in:
-                    possibilities.append((new_prob / (lp if lp != 0 else 1), input_vec, prob_vec, last_token_idx))
+                    possibilities.append(
+                        (
+                            new_prob / (lp if lp != 0 else 1),
+                            input_vec,
+                            prob_vec,
+                            last_token_idx,
+                        )
+                    )
 
         possibilities.sort(key=lambda x: x[0], reverse=True)
 

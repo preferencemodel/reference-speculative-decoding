@@ -12,7 +12,7 @@ def ngram_assisted_speculative_generate(
     inputs: List[int],
     ngramstorage: INgramStorage,
     target: Module,
-    tokenizer = None,
+    tokenizer=None,
     gamma: int = 5,
     filler_top_k: int = 3,
     logits_processor: LogitsProcessor = GreedyProcessor(),
@@ -27,7 +27,7 @@ def ngram_assisted_speculative_generate(
     """
     Generate text sequence using the ngram assisted speculative decoding algorithm.
     Adaptation of Speculative Decoding (https://arxiv.org/pdf/2211.17192.pdf) to use a NGramStorage.
-    
+
     Args:
         inputs (List[int]): input sequence of batch size 1.
         ngramstorage (INgramStorage): NGramStorage as a drafter.
@@ -43,33 +43,41 @@ def ngram_assisted_speculative_generate(
         first_target (bool): whether to run the target model before the speculative algorithm.
         stop_if_unknown (bool): whether to stop the generation if the drafter doesn't know the next token.
         debug (bool): debug mode.
-    
+
     Returns:
         List[int]: generated sequence.
         float: acceptance rate (number of accepted drafts divided by the number of total drafts).
-        
+
     Note: This generation methods only works for decoder-only models.
     """
-    
+
     target_cache = None
-    
-    list_tokens_id = eos_tokens_id if isinstance(eos_tokens_id, list) else [eos_tokens_id]
-    stop_tokens = torch.tensor(list_tokens_id, dtype=torch.long, device=target.device).unsqueeze(1)
-    
-    drafts_accepted = .0
-    drafts_speculated = .0
-    
+
+    list_tokens_id = (
+        eos_tokens_id if isinstance(eos_tokens_id, list) else [eos_tokens_id]
+    )
+    stop_tokens = torch.tensor(
+        list_tokens_id, dtype=torch.long, device=target.device
+    ).unsqueeze(1)
+
+    drafts_accepted = 0.0
+    drafts_speculated = 0.0
+
     # prepare input tensor
     prompt_len = len(inputs)
     total_len = min(target.config.max_position_embeddings, prompt_len + max_gen_len)
-    input_ids = torch.full((1, total_len), pad_token_id, dtype=torch.long, device=target.device)
-    input_ids[0, :prompt_len] = torch.tensor(inputs, dtype=torch.long, device=target.device)
-    
+    input_ids = torch.full(
+        (1, total_len), pad_token_id, dtype=torch.long, device=target.device
+    )
+    input_ids[0, :prompt_len] = torch.tensor(
+        inputs, dtype=torch.long, device=target.device
+    )
+
     current_position = prompt_len
-    
+
     # initialize the ngram model
     ngramstorage.initialize(input_ids[..., :prompt_len])
-    
+
     if first_target:
         # run the target model before the speculative algorithm. Allows to prefill the kvcache and get a first token.
         Mp = target(
@@ -85,48 +93,59 @@ def ngram_assisted_speculative_generate(
         ngramstorage.update(input_ids[..., :prompt_len], t)
         if debug:
             printing.initial_step(t, tokenizer)
-    
+
     while current_position < total_len:
         corrected_gamma = min(gamma, total_len - current_position - 1)
-        
+
         copied_inputs_ids = input_ids.clone()
-        
+
         # generate gamma drafts
         for k in range(corrected_gamma):
-            copied_inputs_ids[0, current_position + k], known = ngramstorage.next_token(copied_inputs_ids[..., :current_position + k])
+            copied_inputs_ids[0, current_position + k], known = ngramstorage.next_token(
+                copied_inputs_ids[..., : current_position + k]
+            )
             if not known[0] and stop_if_unknown:
                 corrected_gamma = k
                 break
-        
+
         drafts_speculated += corrected_gamma
         copied_inputs_ids = copied_inputs_ids.to(target.device)
-        
+
         # run target model on drafts and get logits of the previous tokens plus one more token
         Mp = target(
-            input_ids=copied_inputs_ids[..., :current_position + corrected_gamma],
+            input_ids=copied_inputs_ids[..., : current_position + corrected_gamma],
             past_key_values=target_cache,
             use_cache=use_cache,
         )
         target_cache = Mp.past_key_values
-        draft_logits = Mp.logits[..., current_position - 1:current_position + corrected_gamma - 1, :] # [1, corrected_gamma, vocab_size]
-        p = logits_processor(draft_logits) # [1, gamma, vocab_size]
-        
+        draft_logits = Mp.logits[
+            ..., current_position - 1 : current_position + corrected_gamma - 1, :
+        ]  # [1, corrected_gamma, vocab_size]
+        p = logits_processor(draft_logits)  # [1, gamma, vocab_size]
+
         n = corrected_gamma
         for i in range(corrected_gamma):
             sample = logits_processor.sample(p[0, i, :])
             if copied_inputs_ids[0, current_position + i] != sample:
                 n = i
                 break
-        
+
         drafts_accepted += n
-        
+
         # check if the end token is in the drafts
-        stop_locations = torch.nonzero(torch.eq(copied_inputs_ids[..., current_position:current_position + n], stop_tokens))
+        stop_locations = torch.nonzero(
+            torch.eq(
+                copied_inputs_ids[..., current_position : current_position + n],
+                stop_tokens,
+            )
+        )
         if stop_locations.shape[0] > 0:
             stop_location = stop_locations[0, 1].item()
             if debug:
                 printing.end_token_found(stop_location)
-            return copied_inputs_ids[0, prompt_len:current_position + stop_location + 1].tolist(), drafts_accepted / drafts_speculated
+            return copied_inputs_ids[
+                0, prompt_len : current_position + stop_location + 1
+            ].tolist(), drafts_accepted / drafts_speculated
 
         # adjust the distribution from Mp
         if n == corrected_gamma:
@@ -136,29 +155,52 @@ def ngram_assisted_speculative_generate(
             # prune the cache
             if use_cache:
                 target_cache = prune_cache(target_cache, corrected_gamma - n + 1)
-            
+
             p_p = p[..., n, :]
         x = logits_processor.sample(p_p)
-        input_ids[0, current_position:current_position + n] = copied_inputs_ids[0, current_position:current_position + n]
+        input_ids[0, current_position : current_position + n] = copied_inputs_ids[
+            0, current_position : current_position + n
+        ]
         input_ids[0, current_position + n] = x
-        
+
         if debug:
-            printing.speculative_step(tokenizer, copied_inputs_ids, input_ids, n, prompt_len, current_position, corrected_gamma)
-        
+            printing.speculative_step(
+                tokenizer,
+                copied_inputs_ids,
+                input_ids,
+                n,
+                prompt_len,
+                current_position,
+                corrected_gamma,
+            )
+
         # update the ngram model
         for i in range(n):
-            ngramstorage.update(input_ids[..., :current_position + i], input_ids[..., current_position + i].unsqueeze(0))
+            ngramstorage.update(
+                input_ids[..., : current_position + i],
+                input_ids[..., current_position + i].unsqueeze(0),
+            )
             if filler_top_k > 1:
-                ngramstorage.update(input_ids[..., :current_position + i], p[..., i, :].topk(filler_top_k).indices)
-        ngramstorage.update(input_ids[..., :current_position + n], x)
+                ngramstorage.update(
+                    input_ids[..., : current_position + i],
+                    p[..., i, :].topk(filler_top_k).indices,
+                )
+        ngramstorage.update(input_ids[..., : current_position + n], x)
         if filler_top_k > 1:
-            ngramstorage.update(input_ids[..., :current_position + n], p_p.topk(filler_top_k).indices)
-        
+            ngramstorage.update(
+                input_ids[..., : current_position + n], p_p.topk(filler_top_k).indices
+            )
+
         current_position += n + 1
-        
+
         if torch.isin(x, stop_tokens):
             if debug:
                 printing.end_token_found(n)
-            return input_ids[0, prompt_len:current_position].tolist(), drafts_accepted / drafts_speculated if drafts_speculated > 0 else 0.0
-    
-    return input_ids[0, prompt_len:].tolist(), drafts_accepted / drafts_speculated if drafts_speculated > 0 else 0.0
+            return (
+                input_ids[0, prompt_len:current_position].tolist(),
+                drafts_accepted / drafts_speculated if drafts_speculated > 0 else 0.0,
+            )
+
+    return input_ids[
+        0, prompt_len:
+    ].tolist(), drafts_accepted / drafts_speculated if drafts_speculated > 0 else 0.0

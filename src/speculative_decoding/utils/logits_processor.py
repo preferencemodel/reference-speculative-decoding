@@ -79,8 +79,8 @@ class NucleusProcessor(MultinomialProcessor):
         sorted_logits[sorted_indices_to_remove] = -1e20
         logits = torch.gather(sorted_logits, -1, sorted_indices.argsort(-1))
         return logits
-    
-    
+
+
 class TopKNucleusProcessor(MultinomialProcessor):
     """Top-k and nucleus: Top-k sampling with top-p fallback."""
 
